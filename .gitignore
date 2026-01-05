@@ -38,6 +38,7 @@ venv.bak/
 *.swo
 *~
 .DS_Store
+SECURITY.md
 
 # Testing
 .pytest_cache/
