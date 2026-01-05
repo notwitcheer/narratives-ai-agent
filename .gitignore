@@ -39,6 +39,7 @@ venv.bak/
 *~
 .DS_Store
 SECURITY.md
+CLAUDE.md
 
 # Testing
 .pytest_cache/
