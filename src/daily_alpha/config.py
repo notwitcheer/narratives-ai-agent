@@ -46,3 +46,4 @@ load_env()
 
 # Export commonly used config values
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+MONI_API_KEY = os.getenv("MONI_API_KEY")

@@ -6,8 +6,11 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
-from .config import GITHUB_TOKEN
+from .config import GITHUB_TOKEN, MONI_API_KEY
 from .aggregators.tech_trends import get_ai_trends_report, TechTrendsAggregator
+from .sources.moni import MoniClient
+from .aggregators.crypto_trends import CryptoTrendsAggregator
+from .aggregators.daily_briefing import generate_daily_briefing
 
 
 # Initialize the MCP server
@@ -96,6 +99,72 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        Tool(
+            name="get_crypto_trends",
+            description=(
+                "Get trending crypto projects, mindshare data, and smart money activity. "
+                "Provides insights into crypto narratives, rising projects, and influential "
+                "account mentions using Moni's social intelligence platform."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["24h", "7d", "30d"],
+                        "description": (
+                            "Time period for analysis: '24h' for daily trends, '7d' for weekly, "
+                            "'30d' for monthly perspective"
+                        ),
+                        "default": "24h",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Optional category filter: 'defi', 'l1', 'l2', 'gaming', 'ai', 'meme', etc. "
+                            "Leave empty for all categories"
+                        ),
+                    },
+                    "include_smart_activity": {
+                        "type": "boolean",
+                        "description": "Include smart money mentions and activity in the report",
+                        "default": True,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_daily_briefing",
+            description=(
+                "Generate a comprehensive daily alpha briefing combining crypto trends (Moni) "
+                "and tech/AI developments (GitHub). Provides cross-sector insights and identifies "
+                "opportunities spanning both crypto and tech innovation."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["daily", "weekly"],
+                        "description": (
+                            "'daily' covers last 24 hours, 'weekly' covers last 7 days. "
+                            "Daily gives fresh developments, weekly shows bigger trends."
+                        ),
+                        "default": "daily",
+                    },
+                    "focus_areas": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional focus areas: 'mcp', 'agents', 'defi', 'l1', 'l2', 'ai', 'gaming'. "
+                            "Multiple areas can be specified for targeted briefing."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -150,6 +219,55 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             aggregator = TechTrendsAggregator(github_token=github_token)
             report = await aggregator.get_new_releases(days=days)
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "get_crypto_trends":
+            timeframe = arguments.get("timeframe", "24h")
+            category = arguments.get("category")
+            include_smart_activity = arguments.get("include_smart_activity", True)
+
+            # Check if Moni API key is available
+            if not MONI_API_KEY:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        "Error: MONI_API_KEY not found. Please:\n"
+                        "1. Contact @moni_api_support on Telegram to get an API key\n"
+                        "2. Add MONI_API_KEY=your_key to your .env file\n"
+                        "3. Or set the MONI_API_KEY environment variable"
+                    )
+                )]
+
+            # Create Moni client and aggregator
+            async with MoniClient(MONI_API_KEY) as moni_client:
+                aggregator = CryptoTrendsAggregator(moni_client)
+
+                # Get comprehensive crypto trends
+                crypto_data = await aggregator.get_comprehensive_overview(
+                    timeframe=timeframe,
+                    category=category
+                )
+
+                # Format the report
+                report = aggregator.format_crypto_report(
+                    crypto_data,
+                    include_details=include_smart_activity
+                )
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "get_daily_briefing":
+            timeframe = arguments.get("timeframe", "daily")
+            focus_areas = arguments.get("focus_areas")
+
+            # Generate comprehensive briefing
+            report = await generate_daily_briefing(
+                github_token=GITHUB_TOKEN,
+                moni_api_key=MONI_API_KEY,
+                timeframe=timeframe,
+                focus_areas=focus_areas
+            )
 
             return [TextContent(type="text", text=report)]
 
