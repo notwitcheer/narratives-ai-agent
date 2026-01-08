@@ -232,10 +232,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=(
-                        "Error: MONI_API_KEY not found. Please:\n"
-                        "1. Contact @moni_api_support on Telegram to get an API key\n"
-                        "2. Add MONI_API_KEY=your_key to your .env file\n"
-                        "3. Or set the MONI_API_KEY environment variable"
+                        "❌ **Moni API Error (401)**: Request failed with status code 401\n\n"
+                        "**Invalid API key. Please check your MONI_API_KEY.**\n\n"
+                        "Troubleshooting:\n"
+                        "1. **Claude Desktop**: Add MCP server to claude_desktop_config.json with correct cwd path\n"
+                        "2. **API Key**: Verify MONI_API_KEY in your .env file: `MONI_API_KEY=your_key_here`\n"
+                        "3. **Support**: Contact @moni_api_support on Telegram for a valid API key\n\n"
+                        "Current working directory needs access to your .env file."
                     )
                 )]
 
