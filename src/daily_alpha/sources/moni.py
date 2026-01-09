@@ -12,9 +12,10 @@ import asyncio
 import logging
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from urllib.parse import quote
+import time
 
 import httpx
 
@@ -106,6 +107,81 @@ def validate_timeframe(timeframe: str) -> str:
     return timeframe
 
 
+class RateLimitManager:
+    """
+    Manages API rate limiting with intelligent delays and retry logic.
+    """
+
+    def __init__(self, requests_per_minute: int = 25, burst_limit: int = 3):
+        self.requests_per_minute = requests_per_minute
+        self.burst_limit = burst_limit
+        self.request_times = []
+        self.last_rate_limit_time = None
+
+    async def wait_if_needed(self):
+        """Wait if we're approaching rate limits."""
+        now = time.time()
+
+        # If we were recently rate limited, wait longer
+        if self.last_rate_limit_time and (now - self.last_rate_limit_time) < 70:
+            wait_time = 70 - (now - self.last_rate_limit_time) + random.uniform(2, 8)
+            logger.info(f"⏳ Rate limited recently, waiting {wait_time:.1f}s")
+            await asyncio.sleep(wait_time)
+            return
+
+        # Clean old request times (older than 1 minute)
+        self.request_times = [t for t in self.request_times if now - t < 60]
+
+        # Check if we're approaching limits
+        if len(self.request_times) >= self.requests_per_minute - 5:  # Conservative buffer
+            wait_time = 65 - (now - self.request_times[0]) + random.uniform(1, 4)
+            logger.info(f"⏳ Approaching rate limit, waiting {wait_time:.1f}s")
+            await asyncio.sleep(wait_time)
+        elif len(self.request_times) >= self.burst_limit:
+            # Progressive delays for burst protection
+            burst_delay = min(5, len(self.request_times) - self.burst_limit + 2)
+            await asyncio.sleep(burst_delay + random.uniform(0.5, 1.5))
+
+        self.request_times.append(now)
+
+    def mark_rate_limited(self):
+        """Mark that we've been rate limited."""
+        self.last_rate_limit_time = time.time()
+        logger.warning(f"🚫 Rate limited at {datetime.now()}")
+
+
+class AccountCache:
+    """
+    Simple cache for account information to avoid repeated API calls.
+    """
+
+    def __init__(self, ttl_minutes: int = 15):
+        self.cache = {}
+        self.ttl_seconds = ttl_minutes * 60
+
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get cached value if not expired."""
+        if key in self.cache:
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl_seconds:
+                return value
+            else:
+                del self.cache[key]
+        return None
+
+    def set(self, key: str, value: Dict[str, Any]):
+        """Cache a value with timestamp."""
+        self.cache[key] = (value, time.time())
+
+    def clear(self):
+        """Clear all cached values."""
+        self.cache.clear()
+
+    def size(self) -> int:
+        """Get cache size."""
+        return len(self.cache)
+
+
 class MoniClient:
     """
     Async client for Moni API - Social Intelligence Layer for Web3.
@@ -114,27 +190,47 @@ class MoniClient:
     and narrative trends in the crypto space.
     """
 
-    def __init__(self, api_key: str, base_url: str = "https://api.discover.getmoni.io/api/v3"):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.discover.getmoni.io/api/v3",
+        requests_per_minute: int = 20,  # Conservative rate limit
+        cache_ttl_minutes: int = 15
+    ):
         """
-        Initialize Moni API client.
+        Initialize Moni API client with intelligent rate limiting and caching.
 
         Args:
             api_key: API key from Moni (contact @moni_api_support)
             base_url: Base URL for Moni API
+            requests_per_minute: Max requests per minute (conservative default)
+            cache_ttl_minutes: Cache time-to-live in minutes
         """
         self.api_key = api_key
         self.base_url = base_url.rstrip('/')
 
-        # HTTP client with timeout and retry logic
-        timeout = httpx.Timeout(30.0, connect=10.0)
-        limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        # Initialize rate limiting and caching
+        self.rate_limiter = RateLimitManager(requests_per_minute)
+        self.account_cache = AccountCache(cache_ttl_minutes)
+
+        # Track performance stats
+        self.stats = {
+            "requests_made": 0,
+            "cache_hits": 0,
+            "rate_limit_waits": 0,
+            "errors": 0
+        }
+
+        # HTTP client with conservative connection settings
+        timeout = httpx.Timeout(40.0, connect=15.0)  # Longer timeouts
+        limits = httpx.Limits(max_keepalive_connections=3, max_connections=5)  # Fewer connections
 
         self.client = httpx.AsyncClient(
             timeout=timeout,
             limits=limits,
             headers={
                 "Api-Key": api_key,
-                "User-Agent": "DailyAlpha-MCP/1.0",
+                "User-Agent": "DailyAlpha-MCP/1.2-RateLimited",
                 "Accept": "application/json"
             }
         )
@@ -152,70 +248,132 @@ class MoniClient:
         method: str,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        data: Optional[Dict[str, Any]] = None
+        data: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3
     ) -> Dict[str, Any]:
         """
-        Make HTTP request to Moni API with error handling.
+        Make HTTP request to Moni API with intelligent rate limiting and retry logic.
 
         Args:
             method: HTTP method (GET, POST, etc.)
             endpoint: API endpoint (without base URL)
             params: Query parameters
             data: Request body data
+            max_retries: Maximum retry attempts
 
         Returns:
             JSON response data
 
         Raises:
-            MoniAPIError: If API request fails
+            MoniAPIError: If API request fails after retries
         """
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        last_exception = None
 
-        try:
-            logger.debug(f"Making {method} request to {url}")
+        for attempt in range(max_retries + 1):
+            try:
+                # Wait for rate limiting before making request
+                await self.rate_limiter.wait_if_needed()
 
-            response = await self.client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=data
-            )
+                logger.debug(f"Making {method} request to {url} (attempt {attempt + 1})")
 
-            # Check for rate limiting
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
-                raise MoniAPIError(
-                    f"Rate limited. Retry after {retry_after} seconds"
+                response = await self.client.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=data
                 )
 
-            # Raise for HTTP errors
-            response.raise_for_status()
+                # Track request
+                self.stats["requests_made"] += 1
 
-            return response.json()
+                # Handle rate limiting with intelligent backoff
+                if response.status_code == 429:
+                    self.rate_limiter.mark_rate_limited()
+                    self.stats["rate_limit_waits"] += 1
 
-        except httpx.TimeoutException:
-            raise MoniAPIError("Request timed out")
-        except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}"
-            try:
-                error_data = e.response.json()
-                if "message" in error_data:
-                    error_msg += f": {error_data['message']}"
-            except (ValueError, AttributeError):
-                error_msg += f": {e.response.text}"
-            raise MoniAPIError(error_msg)
-        except Exception as e:
-            raise MoniAPIError(f"Request failed: {str(e)}")
+                    if attempt < max_retries:
+                        retry_after = int(response.headers.get("Retry-After", 60))
+                        wait_time = min(retry_after + random.uniform(5, 15), 120)  # Cap at 2 minutes
+                        logger.warning(f"⏳ Rate limited (429), waiting {wait_time:.1f}s before retry {attempt + 2}")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        raise MoniAPIError(
+                            f"Rate limited after {max_retries} retries. Try again later."
+                        )
+
+                # Handle other HTTP errors
+                response.raise_for_status()
+
+                return response.json()
+
+            except httpx.TimeoutException as e:
+                last_exception = e
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)  # Exponential backoff
+                    logger.warning(f"⏳ Timeout, retrying in {wait_time:.1f}s (attempt {attempt + 2})")
+                    await asyncio.sleep(wait_time)
+                    continue
+
+            except httpx.HTTPStatusError as e:
+                self.stats["errors"] += 1
+
+                # Don't retry on client errors (4xx), except rate limiting
+                if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                    error_msg = f"HTTP {e.response.status_code}"
+                    try:
+                        error_data = e.response.json()
+                        if "message" in error_data:
+                            error_msg += f": {error_data['message']}"
+                    except (ValueError, AttributeError):
+                        error_msg += f": {e.response.text}"
+                    raise MoniAPIError(error_msg)
+
+                # Retry on server errors (5xx)
+                last_exception = e
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.uniform(2, 5)
+                    logger.warning(f"⏳ Server error {e.response.status_code}, retrying in {wait_time:.1f}s")
+                    await asyncio.sleep(wait_time)
+                    continue
+
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)
+                    logger.warning(f"⏳ Request failed, retrying in {wait_time:.1f}s: {str(e)}")
+                    await asyncio.sleep(wait_time)
+                    continue
+
+        # All retries exhausted
+        self.stats["errors"] += 1
+        if last_exception:
+            if isinstance(last_exception, httpx.HTTPStatusError):
+                error_msg = f"HTTP {last_exception.response.status_code}"
+                try:
+                    error_data = last_exception.response.json()
+                    if "message" in error_data:
+                        error_msg += f": {error_data['message']}"
+                except (ValueError, AttributeError):
+                    error_msg += f": {last_exception.response.text}"
+                raise MoniAPIError(error_msg)
+            else:
+                raise MoniAPIError(f"Request failed after {max_retries} retries: {str(last_exception)}")
+        else:
+            raise MoniAPIError(f"Request failed after {max_retries} retries")
 
     async def get_account_info(
         self,
-        username: str
+        username: str,
+        use_cache: bool = True
     ) -> Dict[str, Any]:
         """
-        Get detailed information about a specific account.
+        Get detailed information about a specific account with caching.
 
         Args:
             username: Account username or handle
+            use_cache: Whether to use cached data if available
 
         Returns:
             Account information and metrics
@@ -223,10 +381,27 @@ class MoniClient:
         try:
             # Sanitize input to prevent injection
             safe_username = sanitize_username(username)
-            safe_username = quote(safe_username, safe='')
+            cache_key = f"account_info:{safe_username}"
 
+            # Check cache first
+            if use_cache:
+                cached_data = self.account_cache.get(cache_key)
+                if cached_data:
+                    self.stats["cache_hits"] += 1
+                    logger.debug(f"📋 Cache hit for {username}")
+                    return cached_data
+
+            # Make API request
+            safe_username = quote(safe_username, safe='')
             data = await self._make_request("GET", f"/accounts/{safe_username}/info/full/")
+
+            # Cache the result
+            if data and use_cache:
+                self.account_cache.set(cache_key, data)
+                logger.debug(f"💾 Cached account info for {username}")
+
             return data
+
         except ValueError as e:
             logger.error(f"Invalid username '{username}': {e}")
             return {}
@@ -423,14 +598,18 @@ class MoniClient:
 
             smart_moves = []
 
-            for account_handle in smart_accounts[:5]:  # Limit to prevent rate limits
+            # Limit accounts to prevent rate limiting, prioritize tier-1 accounts
+            limited_accounts = smart_accounts[:3]  # Reduced from 5 to 3 for better rate limiting
+
+            for i, account_handle in enumerate(limited_accounts):
                 try:
-                    # Get account activity
-                    account_info = await self.get_account_info(account_handle)
+                    # Get account activity (using cache!)
+                    account_info = await self.get_account_info(account_handle, use_cache=True)
                     if not account_info:
                         continue
 
-                    smarts = await self.get_account_smarts(account_handle, limit=10)
+                    # Get smart mentions with rate limiting consideration
+                    smarts = await self.get_account_smarts(account_handle, limit=8)  # Reduced limit
 
                     # Analyze recent activity for emerging interests
                     move = await self._analyze_smart_money_activity(
@@ -440,11 +619,16 @@ class MoniClient:
                     if move:
                         smart_moves.append(move)
 
-                    # Rate limiting pause
-                    await asyncio.sleep(0.5)
+                    # Progressive delays: longer waits as we make more requests
+                    if i < len(limited_accounts) - 1:  # Don't wait after the last request
+                        delay = min(2.0, 0.8 + (i * 0.4)) + random.uniform(0.5, 1.0)
+                        logger.debug(f"⏳ Waiting {delay:.1f}s before next smart money account")
+                        await asyncio.sleep(delay)
 
                 except Exception as e:
                     logger.debug(f"Skipping {account_handle}: {e}")
+                    # Small delay even on errors to avoid rapid retries
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
                     continue
 
             # Sort by significance score
@@ -921,9 +1105,14 @@ class MoniClient:
                 if cat not in project_accounts:
                     continue
 
-                for project_name, account_handle in list(project_accounts[cat].items())[:limit//len(categories_to_check) + 1]:
+                # Process projects in smaller batches with delays to avoid rate limiting
+                project_items = list(project_accounts[cat].items())[:limit//len(categories_to_check) + 1]
+
+                for i, (project_name, account_handle) in enumerate(project_items):
                     try:
-                        account_info = await self.get_account_info(account_handle)
+                        # Use cached account info (this will hit cache often!)
+                        account_info = await self.get_account_info(account_handle, use_cache=True)
+
                         if account_info and "smartEngagement" in account_info:
                             engagement = account_info["smartEngagement"]
 
@@ -941,12 +1130,21 @@ class MoniClient:
                             }
                             projects.append(project)
 
+                        # Smart batching: delay every few requests, longer delay every batch
+                        if i > 0 and (i + 1) % 3 == 0:  # Every 3 requests
+                            await asyncio.sleep(random.uniform(0.5, 1.5))
+                        elif i > 0:  # Between individual requests
+                            await asyncio.sleep(random.uniform(0.2, 0.8))
+
                     except Exception as e:
                         logger.debug(f"Skipping {project_name} ({account_handle}): {e}")
                         continue
 
                 if len(projects) >= limit:
                     break
+
+                # Delay between categories
+                await asyncio.sleep(random.uniform(1, 2))
 
             # Sort by mindshare score
             projects.sort(key=lambda x: x.get("mindshare_score", 0), reverse=True)
@@ -1263,8 +1461,48 @@ class MoniClient:
             logger.error(f"Failed to get trending narratives: {e}")
             return []
 
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """
+        Get performance statistics for rate limiting and caching.
+
+        Returns:
+            Dictionary with performance metrics
+        """
+        return {
+            "requests_made": self.stats["requests_made"],
+            "cache_hits": self.stats["cache_hits"],
+            "rate_limit_waits": self.stats["rate_limit_waits"],
+            "errors": self.stats["errors"],
+            "cache_size": self.account_cache.size(),
+            "cache_hit_ratio": (
+                self.stats["cache_hits"] / max(1, self.stats["requests_made"] + self.stats["cache_hits"])
+            ),
+            "success_rate": (
+                (self.stats["requests_made"] - self.stats["errors"]) / max(1, self.stats["requests_made"])
+            )
+        }
+
+    def reset_stats(self):
+        """Reset performance statistics."""
+        self.stats = {
+            "requests_made": 0,
+            "cache_hits": 0,
+            "rate_limit_waits": 0,
+            "errors": 0
+        }
+
+    def clear_cache(self):
+        """Clear all cached data."""
+        self.account_cache.clear()
+        logger.info("🧹 Cleared all cached data")
+
     async def close(self):
-        """Close the HTTP client."""
+        """Close the HTTP client with performance summary."""
+        # Log final stats
+        stats = self.get_performance_stats()
+        logger.info(f"🏁 Session stats: {stats['requests_made']} requests, "
+                   f"{stats['cache_hit_ratio']:.1%} cache hit rate, "
+                   f"{stats['success_rate']:.1%} success rate")
         await self.client.aclose()
 
 
