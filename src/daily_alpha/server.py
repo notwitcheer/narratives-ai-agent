@@ -9,6 +9,8 @@ from mcp.server.stdio import stdio_server
 from .config import GITHUB_TOKEN, MONI_API_KEY
 from .aggregators.tech_trends import get_ai_trends_report, TechTrendsAggregator
 from .sources.moni import MoniClient
+from .sources.defillama import DeFiLlamaClient
+from .sources.coingecko import CoinGeckoClient
 from .aggregators.crypto_trends import CryptoTrendsAggregator
 from .aggregators.daily_briefing import generate_daily_briefing
 
@@ -266,6 +268,136 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["project_name"],
+            },
+        ),
+        Tool(
+            name="analyze_defi_market",
+            description=(
+                "Analyze the current DeFi market using DeFiLlama data. Provides comprehensive "
+                "insights into TVL trends, top protocols, chain dominance, and market dynamics. "
+                "Completely free data source with real-time protocol analytics."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "focus_categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific DeFi categories to focus on (e.g., 'Lending', 'DEXes', 'Yield')",
+                    },
+                    "min_tvl": {
+                        "type": "number",
+                        "description": "Minimum TVL in USD to include protocols",
+                        "default": 1000000,
+                    },
+                    "include_chains": {
+                        "type": "boolean",
+                        "description": "Include chain-level TVL analysis",
+                        "default": True,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_trending_cryptos",
+            description=(
+                "Get trending cryptocurrencies from CoinGecko with market data analysis. "
+                "Combines trending coins with price momentum, market cap analysis, and "
+                "community sentiment. Uses free CoinGecko API (10K calls/month)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "include_market_data": {
+                        "type": "boolean",
+                        "description": "Include detailed market data and price analysis",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum cryptocurrencies to return",
+                        "default": 10,
+                    },
+                    "vs_currency": {
+                        "type": "string",
+                        "enum": ["usd", "eur", "btc"],
+                        "description": "Currency to quote prices in",
+                        "default": "usd",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="scan_multi_platform_opportunities",
+            description=(
+                "Cross-reference opportunities across Moni (social), DeFiLlama (TVL), and "
+                "CoinGecko (market data) to identify high-conviction crypto alpha. Combines "
+                "social sentiment, protocol fundamentals, and market dynamics for comprehensive analysis."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sectors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Crypto sectors to focus on: 'defi', 'l1', 'l2', 'gaming', 'ai'",
+                        "default": ["defi", "l1", "ai"],
+                    },
+                    "timeframe": {
+                        "type": "string",
+                        "enum": ["24h", "7d"],
+                        "description": "Analysis timeframe",
+                        "default": "7d",
+                    },
+                    "confidence_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Minimum confidence for cross-platform signals",
+                        "default": 0.7,
+                    },
+                    "max_results": {
+                        "type": "number",
+                        "description": "Maximum opportunities to return",
+                        "default": 8,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="analyze_protocol_fundamentals",
+            description=(
+                "Deep dive analysis of a specific crypto protocol combining social intelligence "
+                "(Moni), TVL data (DeFiLlama), and market metrics (CoinGecko). Provides comprehensive "
+                "fundamental analysis across multiple data dimensions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "protocol_name": {
+                        "type": "string",
+                        "description": "Name of the protocol to analyze (e.g., 'Uniswap', 'Aave', 'Ethereum')",
+                    },
+                    "include_social": {
+                        "type": "boolean",
+                        "description": "Include social sentiment from Moni",
+                        "default": True,
+                    },
+                    "include_tvl": {
+                        "type": "boolean",
+                        "description": "Include TVL analysis from DeFiLlama",
+                        "default": True,
+                    },
+                    "include_market": {
+                        "type": "boolean",
+                        "description": "Include market data from CoinGecko",
+                        "default": True,
+                    },
+                },
+                "required": ["protocol_name"],
             },
         ),
     ]
@@ -594,6 +726,337 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         report += "\\n"
 
                     report += f"**🎯 Recommendation**\\n{recommendation}"
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "analyze_defi_market":
+            focus_categories = arguments.get("focus_categories")
+            min_tvl = arguments.get("min_tvl", 1000000)
+            include_chains = arguments.get("include_chains", True)
+
+            # Analyze DeFi market using DeFiLlama
+            async with DeFiLlamaClient() as defillama_client:
+                market_analysis = await defillama_client.analyze_defi_market(focus_categories)
+
+                if market_analysis.get("error"):
+                    report = f"❌ **DeFi Market Analysis Failed**\\n\\n{market_analysis['error']}"
+                else:
+                    overview = market_analysis.get("market_overview", {})
+                    categories = market_analysis.get("top_categories", [])
+                    protocols = market_analysis.get("top_protocols", [])
+                    chains = market_analysis.get("top_chains", [])
+                    trends = market_analysis.get("market_trends", {})
+
+                    report = (
+                        f"🏦 **DeFi Market Analysis**\\n\\n"
+                        f"**📊 Market Overview**\\n"
+                        f"• Total TVL: {overview.get('total_tvl_formatted', 'N/A')}\\n"
+                        f"• Active Protocols: {overview.get('total_protocols', 0):,}\\n"
+                        f"• Active Chains: {overview.get('total_chains', 0)}\\n"
+                        f"• ETH Dominance: {overview.get('eth_dominance', 'N/A')}\\n\\n"
+
+                        f"**🏆 Top Categories by TVL**\\n"
+                    )
+
+                    for i, category in enumerate(categories[:5], 1):
+                        report += f"{i}. **{category['category'].title()}**: {category['tvl_formatted']} ({category['dominance']})\\n"
+
+                    report += f"\\n**📈 Top Protocols**\\n"
+                    for i, protocol in enumerate(protocols[:5], 1):
+                        name = protocol.get('name', 'Unknown')
+                        tvl = protocol.get('tvl_formatted', 'N/A')
+                        momentum = protocol.get('momentum_score', 'N/A')
+                        report += f"{i}. **{name}**: {tvl} {momentum}\\n"
+
+                    if include_chains and chains:
+                        report += f"\\n**🔗 Top Chains by TVL**\\n"
+                        for i, chain in enumerate(chains[:5], 1):
+                            name = chain.get('name', 'Unknown')
+                            tvl = chain.get('tvl_formatted', 'N/A')
+                            dominance = chain.get('dominance', 0)
+                            report += f"{i}. **{name}**: {tvl} ({dominance:.1f}% dominance)\\n"
+
+                    report += f"\\n**📊 Market Trends**\\n"
+                    report += f"• Growing Protocols: {trends.get('growing_count', 0)}\\n"
+                    report += f"• Declining Protocols: {trends.get('declining_count', 0)}\\n"
+                    report += f"• Stable Protocols: {trends.get('stable_count', 0)}\\n"
+
+                    if trends.get('top_grower'):
+                        grower = trends['top_grower']
+                        report += f"• Top Grower: {grower.get('name')} ({grower.get('change_1d', 0):+.1f}%)\\n"
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "get_trending_cryptos":
+            include_market_data = arguments.get("include_market_data", True)
+            limit = arguments.get("limit", 10)
+            vs_currency = arguments.get("vs_currency", "usd")
+
+            # Get trending cryptocurrencies from CoinGecko
+            async with CoinGeckoClient() as coingecko_client:
+                trending_coins = await coingecko_client.get_trending_coins()
+
+                if include_market_data and trending_coins:
+                    # Get detailed market data for trending coins
+                    coin_ids = [coin['id'] for coin in trending_coins[:limit] if coin.get('id')]
+                    market_data = await coingecko_client.get_market_data(coins=coin_ids, limit=limit)
+
+                    # Merge trending data with market data
+                    market_data_dict = {coin['id']: coin for coin in market_data}
+
+                    enhanced_trending = []
+                    for trending_coin in trending_coins[:limit]:
+                        coin_id = trending_coin.get('id')
+                        if coin_id and coin_id in market_data_dict:
+                            market_coin = market_data_dict[coin_id]
+                            enhanced_coin = {**trending_coin, **market_coin}
+                        else:
+                            enhanced_coin = trending_coin
+                        enhanced_trending.append(enhanced_coin)
+
+                    trending_data = enhanced_trending
+                else:
+                    trending_data = trending_coins
+
+                if not trending_data:
+                    report = "❌ **No trending data available**\\n\\nTry again in a few minutes."
+                else:
+                    report = f"🔥 **Trending Cryptocurrencies** (CoinGecko)\\n\\n"
+
+                    for i, coin in enumerate(trending_data[:limit], 1):
+                        name = coin.get('name', 'Unknown')
+                        symbol = coin.get('symbol', '').upper()
+                        rank = coin.get('market_cap_rank', 'N/A')
+
+                        report += f"**{i}. {name} ({symbol})**\\n"
+
+                        if coin.get('current_price'):
+                            price = coin.get('price_formatted', f"${coin.get('current_price', 0):.4f}")
+                            market_cap = coin.get('market_cap_formatted', 'N/A')
+                            change_24h = coin.get('price_change_percentage_24h_in_currency', 0)
+                            momentum = coin.get('momentum', '❓')
+
+                            report += f"   • Price: {price}\\n"
+                            report += f"   • Market Cap: {market_cap} (#{rank})\\n"
+                            report += f"   • 24h Change: {change_24h:+.1f}%\\n"
+                            report += f"   • Momentum: {momentum}\\n"
+                        else:
+                            report += f"   • Rank: #{rank}\\n"
+                            report += f"   • Score: {coin.get('score', 0)}\\n"
+
+                        report += "\\n"
+
+                    report += f"*Data from CoinGecko trending algorithm*"
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "scan_multi_platform_opportunities":
+            sectors = arguments.get("sectors", ["defi", "l1", "ai"])
+            timeframe = arguments.get("timeframe", "7d")
+            confidence_threshold = arguments.get("confidence_threshold", 0.7)
+            max_results = arguments.get("max_results", 8)
+
+            # Multi-platform opportunity scanning
+            opportunities = []
+
+            try:
+                # Get data from all three platforms
+                async with MoniClient(MONI_API_KEY) as moni_client, \
+                          DeFiLlamaClient() as defillama_client, \
+                          CoinGeckoClient() as coingecko_client:
+
+                    # Get Moni emerging projects
+                    moni_emerging = await moni_client.detect_emerging_projects(
+                        timeframe=timeframe, min_confidence=0.5, limit=20
+                    )
+
+                    # Get DeFi protocols
+                    defi_protocols = await defillama_client.get_protocols(limit=30)
+
+                    # Get trending cryptos
+                    trending_cryptos = await coingecko_client.get_trending_coins()
+
+                    # Cross-reference and score opportunities
+                    project_scores = {}
+
+                    # Score Moni projects
+                    for project in moni_emerging:
+                        name = project.get('name', '').lower()
+                        confidence = project.get('confidence_score', 0)
+                        category = project.get('category', '').lower()
+
+                        if category in sectors or any(sector in category for sector in sectors):
+                            if name not in project_scores:
+                                project_scores[name] = {"sources": [], "total_score": 0, "data": {}}
+
+                            project_scores[name]["sources"].append("moni")
+                            project_scores[name]["total_score"] += confidence * 0.4  # 40% weight for social
+                            project_scores[name]["data"]["moni"] = project
+
+                    # Score DeFi protocols
+                    for protocol in defi_protocols[:15]:
+                        name = protocol.get('name', '').lower()
+                        tvl = protocol.get('tvl', 0)
+                        category = protocol.get('category', '').lower()
+
+                        if 'defi' in sectors and tvl > 10_000_000:  # Only significant DeFi protocols
+                            if name not in project_scores:
+                                project_scores[name] = {"sources": [], "total_score": 0, "data": {}}
+
+                            project_scores[name]["sources"].append("defillama")
+                            # Score based on TVL size and momentum
+                            tvl_score = min(1.0, tvl / 1_000_000_000)  # Normalize to 1B TVL
+                            project_scores[name]["total_score"] += tvl_score * 0.35  # 35% weight for TVL
+                            project_scores[name]["data"]["defillama"] = protocol
+
+                    # Score trending cryptos
+                    for coin in trending_cryptos[:10]:
+                        name = coin.get('name', '').lower()
+
+                        if name not in project_scores:
+                            project_scores[name] = {"sources": [], "total_score": 0, "data": {}}
+
+                        project_scores[name]["sources"].append("coingecko")
+                        trend_score = coin.get('score', 0) / 10  # Normalize score
+                        project_scores[name]["total_score"] += trend_score * 0.25  # 25% weight for trending
+                        project_scores[name]["data"]["coingecko"] = coin
+
+                    # Filter by confidence threshold and cross-platform presence
+                    high_conviction_opportunities = [
+                        (name, data) for name, data in project_scores.items()
+                        if data["total_score"] >= confidence_threshold and len(data["sources"]) >= 2
+                    ]
+
+                    # Sort by total score
+                    high_conviction_opportunities.sort(key=lambda x: x[1]["total_score"], reverse=True)
+
+                    if not high_conviction_opportunities:
+                        report = (
+                            f"🔍 **No High-Conviction Opportunities Found**\\n\\n"
+                            f"**Search Parameters:**\\n"
+                            f"• Sectors: {', '.join(sectors)}\\n"
+                            f"• Confidence Threshold: {confidence_threshold:.1%}\\n"
+                            f"• Required: 2+ platform confirmation\\n\\n"
+                            f"Try lowering the confidence threshold or expanding sectors."
+                        )
+                    else:
+                        report = f"🎯 **Multi-Platform Crypto Opportunities**\\n\\n"
+                        report += f"*Found {len(high_conviction_opportunities)} cross-confirmed signals*\\n\\n"
+
+                        for i, (project_name, data) in enumerate(high_conviction_opportunities[:max_results], 1):
+                            sources = " + ".join(data["sources"])
+                            score = data["total_score"]
+
+                            report += f"**{i}. {project_name.title()}** 🎯\\n"
+                            report += f"   • Cross-Platform Score: {score:.2f} ({score:.1%})\\n"
+                            report += f"   • Data Sources: {sources}\\n"
+
+                            # Add platform-specific insights
+                            if "moni" in data["data"]:
+                                moni_data = data["data"]["moni"]
+                                confidence = moni_data.get("confidence_score", 0)
+                                report += f"   • Social Intelligence: {confidence:.1%} confidence\\n"
+
+                            if "defillama" in data["data"]:
+                                defi_data = data["data"]["defillama"]
+                                tvl = defi_data.get("tvl_formatted", "N/A")
+                                report += f"   • DeFi TVL: {tvl}\\n"
+
+                            if "coingecko" in data["data"]:
+                                cg_data = data["data"]["coingecko"]
+                                rank = cg_data.get("market_cap_rank", "N/A")
+                                report += f"   • Market Trend Rank: #{rank}\\n"
+
+                            report += "\\n"
+
+                        report += f"*Analysis covers {', '.join(sectors)} sectors over {timeframe}*"
+
+            except Exception as e:
+                report = f"❌ **Multi-platform scan failed**: {str(e)}"
+
+            return [TextContent(type="text", text=report)]
+
+        elif name == "analyze_protocol_fundamentals":
+            protocol_name = arguments.get("protocol_name")
+            include_social = arguments.get("include_social", True)
+            include_tvl = arguments.get("include_tvl", True)
+            include_market = arguments.get("include_market", True)
+
+            if not protocol_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'protocol_name' parameter is required"
+                )]
+
+            report = f"🔍 **{protocol_name} - Fundamental Analysis**\\n\\n"
+
+            try:
+                # Social Intelligence (Moni)
+                if include_social and MONI_API_KEY:
+                    async with MoniClient(MONI_API_KEY) as moni_client:
+                        social_health = await moni_client.analyze_project_health(protocol_name)
+
+                        if not social_health.get("error"):
+                            report += f"**🧠 Social Intelligence (Moni)**\\n"
+                            grade = social_health.get('health_grade', 'N/A')
+                            score = social_health.get('overall_health_score', 0)
+                            social = social_health.get('social_intelligence', {})
+
+                            report += f"• Health Grade: {grade} ({score:.1f}/10)\\n"
+                            report += f"• Mindshare Score: {social.get('mindshare_score', 0):,}\\n"
+                            report += f"• Smart Mentions: {social.get('smart_mentions', 0)}\\n"
+                            report += f"• Social Health: {social.get('social_health', 'unknown').title()}\\n\\n"
+
+                # TVL Analysis (DeFiLlama)
+                if include_tvl:
+                    async with DeFiLlamaClient() as defillama_client:
+                        tvl_data = await defillama_client.get_protocol_tvl(protocol_name)
+
+                        if not tvl_data.get("error"):
+                            report += f"**🏦 TVL Analysis (DeFiLlama)**\\n"
+                            report += f"• Current TVL: {tvl_data.get('tvl_formatted', 'N/A')}\\n"
+                            report += f"• Category: {tvl_data.get('category', 'Unknown')}\\n"
+                            report += f"• 24h Change: {tvl_data.get('change_1d', 0):+.1f}%\\n"
+                            report += f"• 7d Change: {tvl_data.get('change_7d', 0):+.1f}%\\n"
+                            report += f"• Momentum: {tvl_data.get('momentum', 'Unknown')}\\n"
+
+                            if tvl_data.get('description'):
+                                report += f"• Description: {tvl_data['description']}\\n"
+                            report += "\\n"
+
+                # Market Data (CoinGecko)
+                if include_market:
+                    async with CoinGeckoClient() as coingecko_client:
+                        # Search for the coin first
+                        search_results = await coingecko_client.search_coins(protocol_name, limit=5)
+
+                        if search_results:
+                            # Use the best match
+                            coin_id = search_results[0].get('id')
+                            coin_data = await coingecko_client.get_coin_info(coin_id, include_market_data=True)
+
+                            if not coin_data.get("error"):
+                                report += f"**📊 Market Data (CoinGecko)**\\n"
+                                report += f"• Price: {coin_data.get('price_formatted', 'N/A')}\\n"
+                                report += f"• Market Cap: {coin_data.get('market_cap_formatted', 'N/A')}\\n"
+                                report += f"• Market Rank: #{coin_data.get('market_cap_rank', 'N/A')}\\n"
+                                report += f"• 24h Volume: {coin_data.get('volume_24h_formatted', 'N/A')}\\n"
+                                report += f"• Price Change 24h: {coin_data.get('price_change_24h', 0):+.1f}%\\n"
+                                report += f"• Price Change 7d: {coin_data.get('price_change_7d', 0):+.1f}%\\n"
+
+                                if coin_data.get('community'):
+                                    community = coin_data['community']
+                                    report += f"• Twitter Followers: {community.get('twitter_followers', 0):,}\\n"
+
+                                if coin_data.get('developer_activity'):
+                                    dev = coin_data['developer_activity']
+                                    report += f"• GitHub Stars: {dev.get('stars', 0):,}\\n"
+                                    report += f"• Recent Commits: {dev.get('commit_count_4_weeks', 0)}\\n"
+
+                report += f"\\n*Analysis generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"
+
+            except Exception as e:
+                report += f"\\n❌ **Analysis Error**: {str(e)}"
 
             return [TextContent(type="text", text=report)]
 
