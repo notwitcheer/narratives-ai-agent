@@ -462,38 +462,83 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             category = arguments.get("category")
             include_smart_activity = arguments.get("include_smart_activity", True)
 
-            # Check if Moni API key is available
+            # Use free integrations (DeFiLlama + CoinGecko) if no Moni API key
             if not MONI_API_KEY:
+                try:
+                    async with DeFiLlamaClient() as defillama_client, \
+                              CoinGeckoClient() as coingecko_client:
+
+                        # Get DeFi trends
+                        trending_protocols = await defillama_client.get_trending_protocols(
+                            timeframe=timeframe.replace('h', '') + 'd' if 'h' in timeframe else timeframe,
+                            limit=8
+                        )
+
+                        # Get trending cryptos
+                        trending_coins = await coingecko_client.get_trending_coins()
+
+                        # Generate free tier report
+                        report = f"🔥 **Crypto Trends** (Free Tier - {timeframe})\\n\\n"
+
+                        if trending_protocols:
+                            report += f"**📈 Trending DeFi Protocols**\\n"
+                            for i, protocol in enumerate(trending_protocols[:5], 1):
+                                name = protocol.get('name', 'Unknown')
+                                tvl = protocol.get('tvl_formatted', 'N/A')
+                                change = protocol.get('change_formatted', 'N/A')
+                                trend = protocol.get('trend_direction', '📊')
+
+                                report += f"{i}. **{name}**: {tvl} {trend} {change}\\n"
+                            report += "\\n"
+
+                        if trending_coins:
+                            report += f"**🌟 Trending Cryptocurrencies**\\n"
+                            for i, coin in enumerate(trending_coins[:5], 1):
+                                name = coin.get('name', 'Unknown')
+                                symbol = coin.get('symbol', '').upper()
+                                rank = coin.get('market_cap_rank', 'N/A')
+
+                                report += f"{i}. **{name} ({symbol})** - Rank #{rank}\\n"
+                            report += "\\n"
+
+                        report += f"**💡 Upgrade for More:**\\n"
+                        report += f"• Add MONI_API_KEY for social intelligence\\n"
+                        report += f"• Smart money tracking & narrative analysis\\n"
+                        report += f"• Cross-platform opportunity scoring\\n\\n"
+                        report += f"*Data from DeFiLlama & CoinGecko (free tiers)*"
+
+                        return [TextContent(type="text", text=report)]
+
+                except Exception as e:
+                    return [TextContent(
+                        type="text",
+                        text=f"❌ **Free crypto trends failed**: {str(e)}"
+                    )]
+
+            # Create Moni client and aggregator (full version with API key)
+            try:
+                async with MoniClient(MONI_API_KEY) as moni_client:
+                    aggregator = CryptoTrendsAggregator(moni_client)
+
+                    # Get comprehensive crypto trends
+                    crypto_data = await aggregator.get_comprehensive_overview(
+                        timeframe=timeframe,
+                        category=category
+                    )
+
+                    # Format the report
+                    report = aggregator.format_crypto_report(
+                        crypto_data,
+                        include_details=include_smart_activity
+                    )
+
+                    return [TextContent(type="text", text=report)]
+
+            except Exception as e:
                 return [TextContent(
                     type="text",
-                    text=(
-                        "❌ **Moni API Error (401)**: Request failed with status code 401\n\n"
-                        "**Invalid API key. Please check your MONI_API_KEY.**\n\n"
-                        "Troubleshooting:\n"
-                        "1. **Claude Desktop**: Add MCP server to claude_desktop_config.json with correct cwd path\n"
-                        "2. **API Key**: Verify MONI_API_KEY in your .env file: `MONI_API_KEY=your_key_here`\n"
-                        "3. **Support**: Contact @moni_api_support on Telegram for a valid API key\n\n"
-                        "Current working directory needs access to your .env file."
-                    )
+                    text=f"❌ **Moni crypto trends failed**: {str(e)}"
                 )]
-
-            # Create Moni client and aggregator
-            async with MoniClient(MONI_API_KEY) as moni_client:
-                aggregator = CryptoTrendsAggregator(moni_client)
-
-                # Get comprehensive crypto trends
-                crypto_data = await aggregator.get_comprehensive_overview(
-                    timeframe=timeframe,
-                    category=category
-                )
-
-                # Format the report
-                report = aggregator.format_crypto_report(
-                    crypto_data,
-                    include_details=include_smart_activity
-                )
-
-            return [TextContent(type="text", text=report)]
 
         elif name == "get_daily_briefing":
             timeframe = arguments.get("timeframe", "daily")
