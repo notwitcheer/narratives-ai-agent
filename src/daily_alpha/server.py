@@ -1,6 +1,7 @@
 """Daily Alpha MCP Server - Main entry point."""
 
 import asyncio
+from datetime import datetime
 from typing import Optional
 from mcp.server import Server
 from mcp.types import Tool, TextContent
